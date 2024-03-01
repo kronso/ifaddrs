@@ -18,7 +18,7 @@
 
 #define UNAME_MAX 9
 #define LAN_PORT_SERVER "4444"
-#define PLAYER_LIMIT 2
+#define PLAYER_LIMIT 32
 
 char host_ipv4[INET_ADDRSTRLEN];
 char broadcast[INET_ADDRSTRLEN];
@@ -76,15 +76,14 @@ void join_server(void)
         perror("bind");
 
     res = recvfrom(socket_fd, &players[1], sizeof(struct PlayerInfo), 0, result->ai_addr, &result->ai_addrlen);
-    if (res == -1)
+    if (res == -1)  
         perror("recvfrom");
     nplayers++;
+
     shutdown(socket_fd, SHUT_RD);
     close(socket_fd);
 
-
     // Bind to the server ip that was given from the broadcast
-
 
     char port_str[6] = { 0 };
     sprintf(port_str, "%d", players[1].port);
@@ -96,20 +95,23 @@ void join_server(void)
 
     socket_fd = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
     if (socket_fd == -1)
-        perror("socket");
-
-    res = bind(socket_fd, result->ai_addr, result->ai_addrlen);
-    if (res == -1)
-        perror("bind");
+        perror("socket");   
 
     res = sendto(socket_fd, &players[0], sizeof(struct PlayerInfo), 0, result->ai_addr, result->ai_addrlen);
     if (res == -1)
         perror("sendto");
-    while (1)
+    nplayers++;
+
+    // receive remaining users to join
+    while (nplayers != PLAYER_LIMIT || state == SEND_BROADCAST)
     {
-        printf("waiting...\n");
-        sleep(5);
-        // res = recvfrom(socket_fd, server_info);
+        res = recvfrom(socket_fd, &players[nplayers], sizeof(struct PlayerInfo), 0, (struct sockaddr *)&players[nplayers].client_addr, &players[nplayers].client_sz);
+        if (res == -1)
+            perror("recvfrom");
+
+        printf("Username: %s\n", players[nplayers].uname);
+        printf("IP: %s", players[nplayers].server_ip);
+        nplayers++;
     }
 
     freeaddrinfo(result);
@@ -123,8 +125,8 @@ void start_server(void)
     struct sockaddr_in server_addr =
     {
         .sin_family = AF_INET,
-        .sin_port = htons(2000),
-        .sin_addr = INADDR_ANY
+        .sin_port = htons(20000),
+        .sin_addr.s_addr = INADDR_ANY
     };
     // if (inet_pton(AF_INET, host_ipv4, &server_addr.sin_addr) == -1)
     //     perror("inet_pton");
@@ -165,9 +167,15 @@ void start_server(void)
                 res = recvfrom(server_fd, &players[nplayers], sizeof(struct PlayerInfo), 0, (struct sockaddr*)&players[nplayers].client_addr, &players[nplayers].client_sz);
                 if (res == -1)
                     perror("recvfrom");
-                printf("Received confirmation...\n");
+                printf("%s has joined...\n", players[nplayers].uname);
                 nplayers++;
-
+                // send user that joined data to users that have already
+                // connected
+                /* don't include the server which is the first player */
+                for (short i = 1; i < nplayers; i++)
+                {
+                    sendto(server_fd, &players[nplayers - 1], sizeof(int), 0, (struct sockaddr *)players[i].client_addr, players[i].client_sz);
+                }   
             }
             if (fds.revents & POLLHUP)
             {
@@ -299,10 +307,9 @@ int main(int argc, char** argv)
         else if (c == 'j')
             join_server();
 
-        sleep(100000);
-    
-        getchar();
     }
+
+
 
     return 0;
 }
