@@ -95,17 +95,34 @@ void join_server(void)
 
     socket_fd = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
     if (socket_fd == -1)
-        perror("socket");   
+        perror("socket");       
 
+    players[0].port = players[1].port;
     res = sendto(socket_fd, &players[0], sizeof(struct PlayerInfo), 0, result->ai_addr, result->ai_addrlen);
     if (res == -1)
         perror("sendto");
     nplayers++;
 
+    shutdown(socket_fd, SHUT_WR);
+    close(socket_fd);
+
+    if (getaddrinfo(host_ipv4, port_str, &hints, &result) != 0)
+    {
+        fprintf(stderr, "Error %d: -- %s\n", errno, gai_strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+
+    socket_fd = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+    if (socket_fd == -1)
+        perror("socket");  
+
+    res = bind(socket_fd, result->ai_addr, result->ai_addrlen);
+    if (res == -1)
+        perror("bind");
     // receive remaining users to join
     while (nplayers != PLAYER_LIMIT || state == SEND_BROADCAST)
     {
-        res = recvfrom(socket_fd, &players[nplayers], sizeof(struct PlayerInfo), 0, (struct sockaddr *)&players[nplayers].client_addr, &players[nplayers].client_sz);
+        res = recvfrom(socket_fd, &players[nplayers], sizeof(struct PlayerInfo), 0, NULL, NULL);
         if (res == -1)
             perror("recvfrom");
 
@@ -122,19 +139,13 @@ void join_server(void)
 void start_server(void)
 {
     int server_fd, res;
+    socklen_t addr_sz;
     struct sockaddr_in server_addr =
     {
         .sin_family = AF_INET,
-        .sin_port = htons(20000),
+        .sin_port = 0,
         .sin_addr.s_addr = INADDR_ANY
     };
-    // if (inet_pton(AF_INET, host_ipv4, &server_addr.sin_addr) == -1)
-    //     perror("inet_pton");
-    
-    // players[0] refers to self
-    players[0].port = ntohs(server_addr.sin_port);
-    nplayers++;
-
     server_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (server_fd == -1)
         perror("server_fd");
@@ -142,6 +153,13 @@ void start_server(void)
     res = bind(server_fd, (struct sockaddr *)&server_addr, sizeof(server_addr));
     if (res == - 1)
         perror("bind");
+
+    // Ephemeral port assigned and return with getsockname
+    addr_sz = sizeof(server_addr);
+    if (getsockname(server_fd, (struct sockaddr *)&server_addr, &addr_sz) == -1)
+        perror("getsockname");
+    players[0].port = ntohs(server_addr.sin_port);
+    nplayers++;
 
     struct pollfd fds =
     {
@@ -156,9 +174,6 @@ void start_server(void)
         res = poll(&fds, nfds, -1);
         if (res == -1)
             perror("poll");
-        
-        // if (res == 0)
-        //     continue;
 
         if (nplayers != PLAYER_LIMIT)
         {
@@ -174,7 +189,27 @@ void start_server(void)
                 /* don't include the server which is the first player */
                 for (short i = 1; i < nplayers; i++)
                 {
-                    sendto(server_fd, &players[nplayers - 1], sizeof(int), 0, (struct sockaddr *)players[i].client_addr, players[i].client_sz);
+                    struct addrinfo* result, hints = 
+                    {
+                        .ai_family   = AF_INET,
+                        .ai_socktype = SOCK_DGRAM,
+                        .ai_protocol = IPPROTO_UDP,
+                    };
+                    char port_str[6] = { 0 };
+                    sprintf(port_str, "%d", players[i].port);
+                    if (getaddrinfo(players[i].server_ip, port_str, &hints, &result) != 0)
+                    {
+                        fprintf(stderr, "Error %d: -- %s\n", errno, gai_strerror(errno));
+                        exit(EXIT_FAILURE);
+                    }
+                    // dont send to itself
+                    if (i != nplayers - 1)
+                    {
+                        res = sendto(server_fd, &players[nplayers - 1], sizeof(struct PlayerInfo), 0, result->ai_addr, result->ai_addrlen);
+                        if (res == -1)
+                            perror("sendto");
+                        printf("Sent from %s to %s...\n", players[nplayers - 1].uname, players[i].uname);
+                    }
                 }   
             }
             if (fds.revents & POLLHUP)
@@ -190,7 +225,6 @@ void start_server(void)
                 struct sockaddr_in* client_addr = NULL;
                 socklen_t client_sz;
 
-                res = recvfrom(server_fd, &input_size, sizeof(int), 0, (struct sockaddr *)client_addr, &client_sz);
                 if (res == -1)
                     perror("recvfrom");
 
@@ -306,10 +340,6 @@ int main(int argc, char** argv)
         }
         else if (c == 'j')
             join_server();
-
     }
-
-
-
     return 0;
 }
