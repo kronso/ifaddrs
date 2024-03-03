@@ -7,6 +7,7 @@
 
 #include <pthread.h>
 #include <ncurses.h>
+#include <signal.h>
 
 #include <netdb.h>
 #include <ifaddrs.h>
@@ -36,18 +37,11 @@ struct PlayerInfo
     char server_ip[INET_ADDRSTRLEN]; 
     in_port_t port; 
 
-    struct sockaddr_in* client_addr;
+    struct addrinfo client_addr;
     socklen_t client_sz;
 };
 struct PlayerInfo players[PLAYER_LIMIT];
 short nplayers = 0;
-
-struct ServerInfo 
-{ 
-    char uname[UNAME_MAX]; 
-    char server_ip[INET_ADDRSTRLEN]; 
-    in_port_t port; 
-};
 
 void join_server(void)
 {
@@ -97,39 +91,77 @@ void join_server(void)
     if (socket_fd == -1)
         perror("socket");       
 
-    players[0].port = players[1].port;
+    // Allows for 
+    int client_fd;
+    socklen_t addr_sz;
+    struct sockaddr_in client_addr = {
+        .sin_family = AF_INET,
+        .sin_port = 0,
+    };
+    inet_pton(AF_INET, host_ipv4, &client_addr.sin_addr);
+    addr_sz = sizeof(client_addr);
+
+    client_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    bind(client_fd, (struct sockaddr *)&client_addr, addr_sz);
+
+    if (getsockname(client_fd, (struct sockaddr *)&client_addr, &addr_sz) == -1)
+        perror("getsockname");
+    players[0].port = ntohs(client_addr.sin_port);
+
+    struct addrinfo* client_info;
+    sprintf(port_str, "%d", players[0].port);
+    if (getaddrinfo(host_ipv4, port_str, &hints, &client_info) != 0)
+    {
+        fprintf(stderr, "Error %d: -- %s\n", errno, gai_strerror(errno));
+        exit(EXIT_FAILURE);
+    }
+    players[0].client_addr = *client_info;
+    players[0].client_sz = sizeof(client_info);
+    // srand(time(NULL));
+    // players[0].port = (rand() % 653556) + 1024;
+    // players[0].port = players[1].port;
     res = sendto(socket_fd, &players[0], sizeof(struct PlayerInfo), 0, result->ai_addr, result->ai_addrlen);
     if (res == -1)
         perror("sendto");
     nplayers++;
 
-    shutdown(socket_fd, SHUT_WR);
-    close(socket_fd);
+    // shutdown(socket_fd, SHUT_WR);
+    // close(socket_fd);
 
-    if (getaddrinfo(host_ipv4, port_str, &hints, &result) != 0)
-    {
-        fprintf(stderr, "Error %d: -- %s\n", errno, gai_strerror(errno));
-        exit(EXIT_FAILURE);
-    }
-
-    socket_fd = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
-    if (socket_fd == -1)
-        perror("socket");  
-
-    res = bind(socket_fd, result->ai_addr, result->ai_addrlen);
-    if (res == -1)
-        perror("bind");
-    // receive remaining users to join
     while (nplayers != PLAYER_LIMIT || state == SEND_BROADCAST)
     {
-        res = recvfrom(socket_fd, &players[nplayers], sizeof(struct PlayerInfo), 0, NULL, NULL);
+        res = recv(socket_fd, &players[nplayers], sizeof(struct PlayerInfo), 0);
         if (res == -1)
             perror("recvfrom");
-
         printf("Username: %s\n", players[nplayers].uname);
-        printf("IP: %s", players[nplayers].server_ip);
+        printf("IP: %s", players[nplayers].server_ip);   
         nplayers++;
     }
+
+    // if (getaddrinfo(host_ipv4, port_str, &hints, &result) != 0)
+    // {
+    //     fprintf(stderr, "Error %d: -- %s\n", errno, gai_strerror(errno));
+    //     exit(EXIT_FAILURE);
+    // }
+
+    // socket_fd = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+    // if (socket_fd == -1)
+    //     perror("socket");  
+
+    // // res = bind(socket_fd, result->ai_addr, result->ai_addrlen);
+    // // if (res == -1)
+    // //     perror("bind");
+    // // receive remaining users to join
+    // while (nplayers != PLAYER_LIMIT || state == SEND_BROADCAST)
+    // {
+    //     res = recvfrom(socket_fd, &players[nplayers], sizeof(struct PlayerInfo), 0, NULL, NULL);
+    //     if (res == -1)
+    //         perror("recvfrom");
+
+    //     printf("Username: %s\n", players[nplayers].uname);
+    //     printf("IP: %s", players[nplayers].server_ip);
+    //     nplayers++;
+    // }
 
     freeaddrinfo(result);
     shutdown(socket_fd, SHUT_RD);
@@ -164,7 +196,7 @@ void start_server(void)
     struct pollfd fds =
     {
         .fd = server_fd,
-        .events = POLLIN,
+        .events = POLLIN | POLLHUP,
     }; 
     nfds_t nfds = 1;
 
@@ -179,33 +211,54 @@ void start_server(void)
         {
             if (fds.revents & POLLIN)
             {
-                res = recvfrom(server_fd, &players[nplayers], sizeof(struct PlayerInfo), 0, (struct sockaddr*)&players[nplayers].client_addr, &players[nplayers].client_sz);
+                res = recv(server_fd, &players[nplayers], sizeof(struct PlayerInfo), 0);
                 if (res == -1)
                     perror("recvfrom");
-                printf("%s has joined...\n", players[nplayers].uname);
+                
+                // Create an addrinfo struct to store the new user's info
+                // as well as to know where and who to send back data.
+                /* CAN'T USE RECVFROM SINCE THE CLIENT ADDRESS RETURN VALUE IS NULL
+                   BECASUSE IT IS SENDING THE DATA TO THIS SERVER */ 
+                // struct addrinfo* result, hints = 
+                // {
+                //     .ai_family   = AF_INET,
+                //     .ai_socktype = SOCK_DGRAM,
+                //     .ai_protocol = IPPROTO_UDP,
+                // };
+
+                // char port_str[6] = { 0 };
+                // sprintf(port_str, "%d", players[nplayers].port);
+                // if (getaddrinfo(players[nplayers].server_ip, port_str, &hints, &result) != 0)
+                // {
+                //     fprintf(stderr, "Error %d: -- %s\n", errno, gai_strerror(errno));
+                //     exit(EXIT_FAILURE);
+                // }
+
+                // addr_sz = sizeof(server_addr);  
+                // if (getsockname(server_fd, (struct sockaddr *)&server_addr, &addr_sz) == -1)
+                //     perror("getsockname");  
+
+                // players[nplayers].client_addr = result;
+                // players[nplayers].client_sz = sizeof(result);
+
+                printf("%s has joined with port %d\n", players[nplayers].uname, players[nplayers].port);
                 nplayers++;
+
                 // send user that joined data to users that have already
                 // connected
                 /* don't include the server which is the first player */
                 for (short i = 1; i < nplayers; i++)
                 {
-                    struct addrinfo* result, hints = 
-                    {
-                        .ai_family   = AF_INET,
-                        .ai_socktype = SOCK_DGRAM,
-                        .ai_protocol = IPPROTO_UDP,
-                    };
-                    char port_str[6] = { 0 };
-                    sprintf(port_str, "%d", players[i].port);
-                    if (getaddrinfo(players[i].server_ip, port_str, &hints, &result) != 0)
-                    {
-                        fprintf(stderr, "Error %d: -- %s\n", errno, gai_strerror(errno));
-                        exit(EXIT_FAILURE);
-                    }
                     // dont send to itself
                     if (i != nplayers - 1)
                     {
-                        res = sendto(server_fd, &players[nplayers - 1], sizeof(struct PlayerInfo), 0, result->ai_addr, result->ai_addrlen);
+                        res = sendto(server_fd, 
+                        &players[nplayers - 1], 
+                        sizeof(struct PlayerInfo), 
+                        0, 
+                        players[nplayers - 1].client_addr.ai_addr, 
+                        players[nplayers - 1].client_addr.ai_addrlen);
+
                         if (res == -1)
                             perror("sendto");
                         printf("Sent from %s to %s...\n", players[nplayers - 1].uname, players[i].uname);
@@ -214,6 +267,7 @@ void start_server(void)
             }
             if (fds.revents & POLLHUP)
             {
+                printf("\nCLIENT DISCONNECTED: %s\n", players[nplayers].uname);
             }
         }
         if (nplayers == PLAYER_LIMIT)
@@ -222,20 +276,20 @@ void start_server(void)
             int input_size = 0;
             if (fds.revents & POLLIN)
             {
-                struct sockaddr_in* client_addr = NULL;
-                socklen_t client_sz;
+            //     struct sockaddr_in* client_addr = NULL;
+            //     socklen_t client_sz;
 
-                if (res == -1)
-                    perror("recvfrom");
+            //     if (res == -1)
+            //         perror("recvfrom");
 
-                for (int i = 0; i < nplayers; i++)
-                {
-                    // Send data to all players except itself
-                    if (players[i].client_addr->sin_addr.s_addr != client_addr->sin_addr.s_addr)
-                    {
-                        sendto(server_fd, &input_size, sizeof(int), 0, (struct sockaddr *)players[i].client_addr, players[i].client_sz);
-                    }
-                }
+            //     for (int i = 0; i < nplayers; i++)
+            //     {
+            //         // Send data to all players except itself
+            //         if (players[i].client_addr->sin_addr.s_addr != client_addr->sin_addr.s_addr)
+            //         {
+            //             sendto(server_fd, &input_size, sizeof(int), 0, (struct sockaddr *)players[i].client_addr, players[i].client_sz);
+            //         }
+            //     }
             }
             if (fds.revents & POLLHUP)
             {
